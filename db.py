@@ -3,13 +3,14 @@ import logging
 import time
 import pathlib
 import sqlite3
-import datetime
+import datetime as dt
 
 import requests
 
-
+SLEEP = 2  # seconds between api requests
 DATABASE = pathlib.Path(".") / "cr.db"
 API_TOKEN = os.getenv("CLASH_ROYALE_API_TOKEN")
+
 assert API_TOKEN, "undefined API TOKEN"
 
 log = logging.getLogger(__name__)
@@ -66,12 +67,10 @@ def create_db():
             (
                 "CREATE TABLE battles ("
                 "battle_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, "
-                "time TEXT, winner INTEGER, "
-                "tag_1 TEXT, trophies_1 INTEGER, king_hp_1 INTEGER, "
-                "princess_1_hp_1 INTEGER, princess_2_hp_1 INTEGER, "
+                "battle_time TEXT, "
+                "tag_1 TEXT, trophies_1 INTEGER, crowns_1 INTEGER, "
                 "deck_1 INTEGER, "
-                "tag_2 TEXT, trophies_2 INTEGER, king_hp_2 INTEGER, "
-                "princess_1_hp_2 INTEGER, princess_2_hp_2 INTEGER, "
+                "tag_2 TEXT, trophies_2 INTEGER, crowns_2 INTEGER, "
                 "deck_2 INTEGER, "
                 "FOREIGN KEY(deck_1) REFERENCES decks(deck_id), "
                 "FOREIGN KEY(deck_2) REFERENCES decks(deck_id)) "
@@ -111,47 +110,80 @@ def in_player(player, update_time=None):
 
 def in_deck(deck):
     cards = sorted([card["id"] for card in deck])
-    print(cards)
+
     with dbopen(DATABASE) as c:
         sql = """SELECT deck_id FROM decks WHERE (
                  card_1=? AND card_2=? AND card_3=? AND card_4=? AND
                  card_5=? AND card_6=? AND card_7=? AND card_8=?)"""
 
         if (deck_id := c.execute(sql, cards).fetchone()) is None:
-            c.execute(f"INSERT INTO decks values (NULL{', ?' * 8})", cards)            
+            c.execute(f"INSERT INTO decks VALUES (NULL{', ?' * 8})", cards)
             return c.lastrowid
 
-        return deck_id
+        return deck_id[0]
 
 
 def in_battle(battle, deck_1, deck_2):
-    ...
+
+    battle_time = dt.datetime.strptime(battle["battleTime"][:-5], "%Y%m%dT%H%M%S")
+
+    sql = """INSERT INTO battles
+            (battle_time, 
+            tag_1, trophies_1, crowns_1, deck_1, 
+            tag_2, trophies_2, crowns_2, deck_2)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+
+    values = [
+        str(battle_time),
+        battle["team"][0]["tag"][1:],
+        battle["team"][0]["startingTrophies"],
+        battle["team"][0]["crowns"],
+        deck_1,
+        battle["opponent"][0]["tag"][1:],
+        battle["opponent"][0]["startingTrophies"],
+        battle["opponent"][0]["crowns"],
+        deck_2,
+    ]
+
+    with dbopen(DATABASE) as c:
+        c.execute(sql, values)
+        return c.lastrowid
 
 
 def is_top_ladder(battle):
-    ...
+
+    if (
+        battle["gameMode"]["id"] == 72000006
+        and battle["opponent"][0]["startingTrophies"] > 6600
+        and battle["team"][0]["startingTrophies"] > 6600
+    ):
+        return True
+
+    return False
 
 
 def main(player):
 
-    log.info(f"Requesting battles log for {player}")
+    log.debug(f"Requesting battles log for {player}")
     url = f"https://api.clashroyale.com/v1/players/%23{player}/battlelog"
     headers = {"Authorization": f"Bearer {API_TOKEN}"}
     battles = requests.get(url, headers=headers).json()
+    in_battles = 0
 
     # TODO handle different resposes
 
     for battle in battles:
-        
-        #  TODO if is_top_ladder():
-        
-        in_player(battle["opponent"][0]["tag"][1:])
-        deck_1 = in_deck(battle["team"][0]["cards"])
-        deck_2 = in_deck(battle["opponent"][0]["cards"])
-        print(deck_2)
-        # TODO  in_battle(battle, deck_1, deck_2)
 
-    in_player(player, str(datetime.datetime.now(datetime.timezone.utc)))
+        if is_top_ladder(battle):
+            in_player(battle["opponent"][0]["tag"][1:])
+            deck_1 = in_deck(battle["team"][0]["cards"])
+            deck_2 = in_deck(battle["opponent"][0]["cards"])
+            if in_battle(battle, deck_1, deck_2):
+                in_battles += 1
+
+    log.debug(f"Insert [{in_battles}/{len(battles)}] battles")
+
+    in_player(player, str(dt.datetime.now(dt.timezone.utc)))
 
 
 if __name__ == "__main__":
@@ -160,16 +192,6 @@ if __name__ == "__main__":
         create_db()
         in_player("G9YV9GR8R")  # root of the search
 
-    # i = 0
-
-    # while player := out_player(0):
-    #     main(player)
-    #     time.sleep(5)
-
-    #     # just for debug
-    #     i += 1
-    #     if i > 10:
-    #         break
-
-    player = out_player()
-    main(player)
+    while player := out_player(0):
+        main(player)
+        time.sleep(SLEEP)
