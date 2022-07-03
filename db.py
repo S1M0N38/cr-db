@@ -1,26 +1,57 @@
-import os
+import argparse
+import datetime as dt
+import json
 import logging
-import time
+import os
 import pathlib
 import sqlite3
-import datetime as dt
+import sys
+import time
+import urllib.request
 
-import requests
+# Path to this file
+here = pathlib.Path(__file__).parent
 
+
+# CLI arguments
+parser = argparse.ArgumentParser()
+parser.add_argument("--log", default="INFO", help="Logging level")
+args = parser.parse_args()
+
+# Constants
 SLEEP = 2  # seconds between api requests
-DATABASE = pathlib.Path(".") / "cr.db"
-API_TOKEN = os.getenv("CLASH_ROYALE_API_TOKEN")
+DATABASE = here / "cr.db"
 
+
+# Token Configuration
+API_TOKEN = os.getenv("CLASH_ROYALE_API_TOKEN")
 assert API_TOKEN, "undefined API TOKEN"
 
+
+# Logging setup
 log = logging.getLogger(__name__)
 log.setLevel(logging.DEBUG)
 
-ch = logging.StreamHandler()
-ch.setLevel(logging.DEBUG)
-ch.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+fmt = logging.Formatter(
+    fmt="%(levelname)8s - %(asctime)s - %(message)s",
+    datefmt="%x %X",
+)
 
-log.addHandler(ch)
+fh = logging.FileHandler(here / "db.log")
+fh.setFormatter(fmt)
+fh.setLevel(logging.DEBUG)
+
+sh = logging.StreamHandler()
+sh.setFormatter(fmt)
+sh.setLevel(getattr(logging, args.log.upper(), "INFO"))
+
+log.addHandler(fh)
+log.addHandler(sh)
+
+
+# HTTP Configuration
+opener = urllib.request.build_opener()
+opener.addheaders = [("Authorization", f"Bearer {API_TOKEN}")]
 
 
 class dbopen:
@@ -162,15 +193,24 @@ def is_top_ladder(battle):
     return False
 
 
-def main(player):
+def api_request(player):
 
     log.debug(f"Requesting battles log for {player}")
     url = f"https://api.clashroyale.com/v1/players/%23{player}/battlelog"
-    headers = {"Authorization": f"Bearer {API_TOKEN}"}
-    battles = requests.get(url, headers=headers).json()
-    in_battles = 0
 
-    # TODO handle different resposes
+    try:
+        with opener.open(url) as f:
+            return json.loads(f.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        response = json.loads(e.read().decode("utf-8"))
+        log.error(f'Reason: {response["reason"]}')
+        sys.exit(response["message"])
+
+
+def main(player):
+
+    battles = api_request(player)
+    in_battles = 0
 
     for battle in battles:
 
@@ -181,7 +221,8 @@ def main(player):
             if in_battle(battle, deck_1, deck_2):
                 in_battles += 1
 
-    log.debug(f"Insert [{in_battles}/{len(battles)}] battles")
+    if in_battles > 0:
+        log.info(f"Insert [{in_battles}/{len(battles)}] battles for {player}")
 
     in_player(player, str(dt.datetime.now(dt.timezone.utc)))
 
