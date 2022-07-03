@@ -9,30 +9,29 @@ import sys
 import time
 import urllib.request
 
+
 # CLI arguments
-parser = argparse.ArgumentParser()
-
-
+parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 parser.add_argument(
     "--log",
     default="INFO",
-    help="Console logging level.",
+    help="console logging level",
 )
 parser.add_argument(
     "--player",
     default="G9YV9GR8R",
-    help="Initial player if there is no player in db.",
+    help="initial player if there is no player in db",
 )
 parser.add_argument(
     "--db",
     default="cr.db",
-    help="Database name. Should have '.db' extention.",
+    help="database name. Should have '.db' extention",
 )
 parser.add_argument(
     "--sleep",
     default=5,
     type=float,
-    help="Sleep time between api requests.",
+    help="sleep time between api requests in seconds",
 )
 args = parser.parse_args()
 
@@ -40,11 +39,6 @@ args = parser.parse_args()
 # Constants
 here = pathlib.Path(__file__).parent
 DATABASE = here / args.db
-
-
-# Token Configuration
-API_TOKEN = os.getenv("CLASH_ROYALE_API_TOKEN")
-assert API_TOKEN, "undefined API TOKEN"
 
 
 # Logging setup
@@ -66,6 +60,18 @@ sh.setLevel(getattr(logging, args.log.upper(), "INFO"))
 
 log.addHandler(fh)
 log.addHandler(sh)
+
+
+# Token Configuration
+token_file = here / "token.txt"
+if token_file.exists():
+    with open("token.txt") as f:
+        API_TOKEN = f.read().strip()
+    log.info("Using API token from token.txt")
+else:
+    API_TOKEN = os.getenv("CLASH_ROYALE_API_TOKEN")
+    log.info("Using API token from enviroment variable")
+assert API_TOKEN, "Undefined API TOKEN"
 
 
 # HTTP Configuration
@@ -128,6 +134,8 @@ def create_db():
         )
         log.debug("Created battles table")
 
+        log.info(f"Database succesfully created at\n {DATABASE}")
+
 
 def out_player(outdated=3600):
 
@@ -168,6 +176,7 @@ def in_deck(deck):
 
         if (deck_id := c.execute(sql, cards).fetchone()) is None:
             c.execute(f"INSERT INTO decks VALUES (NULL{', ?' * 8})", cards)
+            log.debug("Insert new deck into decks")
             return c.lastrowid
 
         return deck_id[0]
@@ -176,34 +185,47 @@ def in_deck(deck):
 def in_battle(battle, deck_1, deck_2):
 
     battle_time = dt.datetime.strptime(battle["battleTime"][:-5], "%Y%m%dT%H%M%S")
+    tag_1 = battle["team"][0]["tag"][1:]
+    tag_2 = battle["opponent"][0]["tag"][1:]
 
-    sql = """INSERT INTO battles
-            (battle_time,
-            tag_1, trophies_1, crowns_1, deck_1,
-            tag_2, trophies_2, crowns_2, deck_2)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+    sql_select = """SELECT battle_id FROM battles WHERE (
+                 battle_time=? AND tag_1=? AND tag_2=?)"""
+
+    sql_insert = """INSERT INTO battles
+                 (battle_time,
+                 tag_1, trophies_1, crowns_1, deck_1,
+                 tag_2, trophies_2, crowns_2, deck_2)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
     values = [
         str(battle_time),
-        battle["team"][0]["tag"][1:],
+        tag_1,
         battle["team"][0]["startingTrophies"],
         battle["team"][0]["crowns"],
         deck_1,
-        battle["opponent"][0]["tag"][1:],
+        tag_2,
         battle["opponent"][0]["startingTrophies"],
         battle["opponent"][0]["crowns"],
         deck_2,
     ]
 
     with dbopen(DATABASE) as c:
-        c.execute(sql, values)
+
+        if c.execute(sql_select, [str(battle_time), tag_1, tag_2]).fetchone():
+            return False
+        if c.execute(sql_select, [str(battle_time), tag_2, tag_1]).fetchone():
+            return False
+
+        c.execute(sql_insert, values)
         return c.lastrowid
 
 
 def is_top_ladder(battle):
 
+    # TODO add more gameMode id (e.g. LadderGoldRush)
+
     if (
-        battle["gameMode"]["id"] == 72000006
+        battle["gameMode"]["id"] in (72000006, 72000201)
         and battle["opponent"][0]["startingTrophies"] > 6600
         and battle["team"][0]["startingTrophies"] > 6600
     ):
@@ -252,6 +274,6 @@ if __name__ == "__main__":
         create_db()
         in_player(args.player)  # root of the search
 
-    while player := out_player(0):
+    while player := out_player():
         main(player)
         time.sleep(args.sleep)
