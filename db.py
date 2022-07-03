@@ -9,18 +9,37 @@ import sys
 import time
 import urllib.request
 
-# Path to this file
-here = pathlib.Path(__file__).parent
-
-
 # CLI arguments
 parser = argparse.ArgumentParser()
-parser.add_argument("--log", default="INFO", help="Logging level")
+
+
+parser.add_argument(
+    "--log",
+    default="INFO",
+    help="Console logging level.",
+)
+parser.add_argument(
+    "--player",
+    default="G9YV9GR8R",
+    help="Initial player if there is no player in db.",
+)
+parser.add_argument(
+    "--db",
+    default="cr.db",
+    help="Database name. Should have '.db' extention.",
+)
+parser.add_argument(
+    "--sleep",
+    default=5,
+    type=float,
+    help="Sleep time between api requests.",
+)
 args = parser.parse_args()
 
+
 # Constants
-SLEEP = 2  # seconds between api requests
-DATABASE = here / "cr.db"
+here = pathlib.Path(__file__).parent
+DATABASE = here / args.db
 
 
 # Token Configuration
@@ -159,8 +178,8 @@ def in_battle(battle, deck_1, deck_2):
     battle_time = dt.datetime.strptime(battle["battleTime"][:-5], "%Y%m%dT%H%M%S")
 
     sql = """INSERT INTO battles
-            (battle_time, 
-            tag_1, trophies_1, crowns_1, deck_1, 
+            (battle_time,
+            tag_1, trophies_1, crowns_1, deck_1,
             tag_2, trophies_2, crowns_2, deck_2)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
@@ -231,8 +250,8 @@ if __name__ == "__main__":
 
     if not DATABASE.exists():
         create_db()
-        in_player("G9YV9GR8R")  # root of the search
+        in_player(args.player)  # root of the search
 
     while player := out_player(0):
         main(player)
-        time.sleep(SLEEP)
+        time.sleep(args.sleep)
