@@ -9,20 +9,6 @@ import sqlite3
 import sys
 import time
 
-
-# Just for debugging
-def timeme(method):
-    def wrapper(*args, **kw):
-        startTime = int(round(time.time() * 1000))
-        result = method(*args, **kw)
-        endTime = int(round(time.time() * 1000))
-
-        print(method.__name__, endTime - startTime, "ms")
-        return result
-
-    return wrapper
-
-
 # CLI arguments
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 parser.add_argument(
@@ -150,63 +136,59 @@ def create_db():
         log.info(f"Database succesfully created at\n {DATABASE}")
 
 
-# @timeme
-def out_player(outdated=3600):
+def out_player(cur, outdated=3600):
 
     # I know that this function is vulnerable to SQL injection attacks but
     # I cannot figure out a way to make parameter substitution work inside
     # datetime function
 
-    with dbopen(DATABASE) as c:
-        player = c.execute(
-            (
-                f"SELECT tag FROM players WHERE ( "
-                f"update_time < datetime('now','+{outdated} seconds') OR "
-                f"update_time is NULL ) "
-                f"ORDER BY update_time "
-            )
-        ).fetchone()
+    player = cur.execute(
+        (
+            f"SELECT tag FROM players WHERE ( "
+            f"update_time < datetime('now','+{outdated} seconds') OR "
+            f"update_time is NULL ) "
+            f"ORDER BY update_time "
+        )
+    ).fetchone()
 
     return player[0] if player is not None else None
 
 
-# @timeme
-def in_player(player, update_time=None):
+def in_player(cur, player, update_time=None):
 
     values = [update_time, player]
 
-    with dbopen(DATABASE) as c:
-        c.execute("INSERT OR IGNORE INTO players VALUES (?, ?)", values)
-        if update_time is not None:
-            c.execute("UPDATE players SET update_time=? WHERE tag=?", values)
+    cur.execute("INSERT OR IGNORE INTO players VALUES (?, ?)", values)
+    if update_time is not None:
+        cur.execute("UPDATE players SET update_time=? WHERE tag=?", values)
 
 
-# @timeme
-def in_deck(deck):
+def in_deck(cur, deck):
     cards = sorted([card["id"] for card in deck])
 
-    with dbopen(DATABASE) as c:
-        sql = """SELECT deck_id FROM decks WHERE (
-                 card_1=? AND card_2=? AND card_3=? AND card_4=? AND
-                 card_5=? AND card_6=? AND card_7=? AND card_8=?)"""
+    sql = """SELECT deck_id FROM decks WHERE (
+             card_1=? AND card_2=? AND card_3=? AND card_4=? AND
+             card_5=? AND card_6=? AND card_7=? AND card_8=?)"""
 
-        if (deck_id := c.execute(sql, cards).fetchone()) is None:
-            c.execute(f"INSERT INTO decks VALUES (NULL{', ?' * 8})", cards)
-            log.debug("Insert new deck into decks")
-            return c.lastrowid
+    if (deck_id := cur.execute(sql, cards).fetchone()) is None:
+        cur.execute(f"INSERT INTO decks VALUES (NULL{', ?' * 8})", cards)
+        log.debug("Insert new deck into decks")
+        return cur.lastrowid
 
         return deck_id[0]
 
 
-# @timeme
-def in_battle(battle, deck_1, deck_2):
+def in_battle(cur, battle, p1_deck, p2_deck):
 
     battle_time = dt.datetime.strptime(battle["battleTime"][:-5], "%Y%m%dT%H%M%S")
-    tag_1 = battle["team"][0]["tag"][1:]
-    tag_2 = battle["opponent"][0]["tag"][1:]
+    p1 = battle["team"][0]
+    p2 = battle["opponent"][0]
+
+    if p1["tag"] > p2["tag"]:
+        p1, p2, p1_deck, p2_deck = p2, p1, p2_deck, p1_deck
 
     sql_select = """SELECT battle_id FROM battles WHERE (
-                 battle_time=? AND tag_1=? AND tag_2=?)"""
+                 battle_time=? AND tag_1=?)"""
 
     sql_insert = """INSERT INTO battles
                  (battle_time,
@@ -214,27 +196,14 @@ def in_battle(battle, deck_1, deck_2):
                  tag_2, trophies_2, crowns_2, deck_2)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
-    values = [
-        str(battle_time),
-        tag_1,
-        battle["team"][0]["startingTrophies"],
-        battle["team"][0]["crowns"],
-        deck_1,
-        tag_2,
-        battle["opponent"][0]["startingTrophies"],
-        battle["opponent"][0]["crowns"],
-        deck_2,
-    ]
+    p1_value = [p1["tag"][1:], p1["startingTrophies"], p1["crowns"], p1_deck]
+    p2_value = [p2["tag"][1:], p2["startingTrophies"], p2["crowns"], p2_deck]
 
-    with dbopen(DATABASE) as c:
+    if cur.execute(sql_select, [str(battle_time), p1["tag"][1:]]).fetchone():
+        return False
 
-        if c.execute(sql_select, [str(battle_time), tag_1, tag_2]).fetchone():
-            return False
-        if c.execute(sql_select, [str(battle_time), tag_2, tag_1]).fetchone():
-            return False
-
-        c.execute(sql_insert, values)
-        return c.lastrowid
+    cur.execute(sql_insert, [str(battle_time), *p1_value, *p2_value])
+    return cur.lastrowid
 
 
 def is_top_ladder(battle):
@@ -251,7 +220,6 @@ def is_top_ladder(battle):
     return False
 
 
-@timeme
 def api_request(player):
 
     log.debug(f"Requesting battles log for {player}")
@@ -266,7 +234,7 @@ def api_request(player):
         sys.exit(data["message"])
 
 
-def main(player):
+def main(cur, player):
 
     battles = api_request(player)
     in_battles = 0
@@ -274,27 +242,29 @@ def main(player):
     for battle in battles:
 
         if is_top_ladder(battle):
-            in_player(battle["opponent"][0]["tag"][1:])
-            deck_1 = in_deck(battle["team"][0]["cards"])
-            deck_2 = in_deck(battle["opponent"][0]["cards"])
-            if in_battle(battle, deck_1, deck_2):
+            in_player(cur, battle["opponent"][0]["tag"][1:])
+            deck_1 = in_deck(cur, battle["team"][0]["cards"])
+            deck_2 = in_deck(cur, battle["opponent"][0]["cards"])
+            if in_battle(cur, battle, deck_1, deck_2):
                 in_battles += 1
 
     if in_battles > 0:
         log.info(f"Insert [{in_battles}/{len(battles)}] battles for {player}")
 
-    in_player(player, str(dt.datetime.now(dt.timezone.utc)))
+    in_player(cur, player, str(dt.datetime.now(dt.timezone.utc)))
 
 
 if __name__ == "__main__":
 
     if not DATABASE.exists():
         create_db()
-        in_player(args.player)  # root of the search
-
+        with dbopen(DATABASE) as cur:
+            in_player(cur, args.player)
     try:
-        while player := out_player():
-            main(player)
+        while True:
+            with dbopen(DATABASE) as cur:
+                player = out_player(cur)
+                main(cur, player)
             time.sleep(args.sleep)
     finally:
         conn.close()
