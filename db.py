@@ -1,5 +1,6 @@
 import argparse
 import datetime as dt
+import http.client
 import json
 import logging
 import os
@@ -7,7 +8,19 @@ import pathlib
 import sqlite3
 import sys
 import time
-import urllib.request
+
+
+# Just for debugging
+def timeme(method):
+    def wrapper(*args, **kw):
+        startTime = int(round(time.time() * 1000))
+        result = method(*args, **kw)
+        endTime = int(round(time.time() * 1000))
+
+        print(method.__name__, endTime - startTime, "ms")
+        return result
+
+    return wrapper
 
 
 # CLI arguments
@@ -75,8 +88,8 @@ assert API_TOKEN, "Undefined API TOKEN"
 
 
 # HTTP Configuration
-opener = urllib.request.build_opener()
-opener.addheaders = [("Authorization", f"Bearer {API_TOKEN}")]
+headers = {"Authorization": f"Bearer {API_TOKEN}"}
+conn = http.client.HTTPSConnection("api.clashroyale.com")
 
 
 class dbopen:
@@ -137,6 +150,7 @@ def create_db():
         log.info(f"Database succesfully created at\n {DATABASE}")
 
 
+# @timeme
 def out_player(outdated=3600):
 
     # I know that this function is vulnerable to SQL injection attacks but
@@ -156,6 +170,7 @@ def out_player(outdated=3600):
     return player[0] if player is not None else None
 
 
+# @timeme
 def in_player(player, update_time=None):
 
     values = [update_time, player]
@@ -166,6 +181,7 @@ def in_player(player, update_time=None):
             c.execute("UPDATE players SET update_time=? WHERE tag=?", values)
 
 
+# @timeme
 def in_deck(deck):
     cards = sorted([card["id"] for card in deck])
 
@@ -182,6 +198,7 @@ def in_deck(deck):
         return deck_id[0]
 
 
+# @timeme
 def in_battle(battle, deck_1, deck_2):
 
     battle_time = dt.datetime.strptime(battle["battleTime"][:-5], "%Y%m%dT%H%M%S")
@@ -225,7 +242,7 @@ def is_top_ladder(battle):
     # TODO add more gameMode id (e.g. LadderGoldRush)
 
     if (
-        battle["gameMode"]["id"] in (72000006, 72000201)
+        battle["gameMode"]["id"] in {72000006, 72000201}
         and battle["opponent"][0]["startingTrophies"] > 6600
         and battle["team"][0]["startingTrophies"] > 6600
     ):
@@ -234,18 +251,19 @@ def is_top_ladder(battle):
     return False
 
 
+@timeme
 def api_request(player):
 
     log.debug(f"Requesting battles log for {player}")
-    url = f"https://api.clashroyale.com/v1/players/%23{player}/battlelog"
+    conn.request("GET", f"/v1/players/#{player}/battlelog", headers=headers)
+    response = conn.getresponse()
+    data = json.loads(response.read().decode("utf-8"))
 
-    try:
-        with opener.open(url) as f:
-            return json.loads(f.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        response = json.loads(e.read().decode("utf-8"))
-        log.error(f'Reason: {response["reason"]}')
-        sys.exit(response["message"])
+    if response.code == 200:
+        return data
+    else:
+        log.error(f'Reason: {data["reason"]}')
+        sys.exit(data["message"])
 
 
 def main(player):
@@ -274,6 +292,10 @@ if __name__ == "__main__":
         create_db()
         in_player(args.player)  # root of the search
 
-    while player := out_player():
-        main(player)
-        time.sleep(args.sleep)
+    try:
+        while player := out_player():
+            main(player)
+            time.sleep(args.sleep)
+    finally:
+        conn.close()
+        log.info("Connection with API closed")
